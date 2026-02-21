@@ -1,0 +1,220 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ============================================
+    // HELPER FUNCTIONS
+    // ============================================
+
+    // Check if user is authenticated
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    // Get user document
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    // Check if user is a super admin
+    function isSuperAdmin() {
+      return isAuth() && getUserDoc().globalRole == "superadmin";
+    }
+
+    // Get pool document
+    function getPool(poolId) {
+      return get(/databases/$(database)/documents/pools/$(poolId)).data;
+    }
+
+    // Check if pool is frozen (super admin can freeze pools)
+    function isPoolFrozen(poolId) {
+      return getPool(poolId).frozen == true;
+    }
+
+    // Get member document for current user in a pool
+    function getMember(poolId) {
+      return get(/databases/$(database)/documents/pools/$(poolId)/members/$(request.auth.uid)).data;
+    }
+
+    // Check if user is a member of the pool
+    function isPoolMember(poolId) {
+      return isAuth() && exists(/databases/$(database)/documents/pools/$(poolId)/members/$(request.auth.uid));
+    }
+
+    // Check if user is pool admin or owner
+    function isPoolAdmin(poolId) {
+      return isPoolMember(poolId) && getMember(poolId).role in ["admin", "owner"];
+    }
+
+    // Check if user is pool owner
+    function isPoolOwner(poolId) {
+      return isPoolMember(poolId) && getMember(poolId).role == "owner";
+    }
+
+    // Check pool subscription tier
+    function getPoolTier(poolId) {
+      return getPool(poolId).subscriptionTier;
+    }
+
+    // Check if pool has at least a certain tier
+    function hasMinTier(poolId, minTier) {
+      let tier = getPoolTier(poolId);
+      return minTier == "free" ? true :
+             minTier == "pro" ? tier in ["pro", "federation"] :
+             minTier == "federation" ? tier == "federation" :
+             false;
+    }
+
+    // ============================================
+    // USERS COLLECTION
+    // ============================================
+    match /users/{userId} {
+      // Users can read their own doc; super admins can read any
+      allow read: if isAuth() && (request.auth.uid == userId || isSuperAdmin());
+
+      // Users can update their own profile (not globalRole)
+      allow update: if isAuth() && request.auth.uid == userId
+                    && !("globalRole" in request.resource.data 
+                         && request.resource.data.globalRole != resource.data.globalRole);
+
+      // Creation handled by Cloud Function trigger
+      allow create: if false;
+      allow delete: if false;
+    }
+
+    // ============================================
+    // POOLS COLLECTION
+    // ============================================
+    match /pools/{poolId} {
+      // Public pools readable by anyone authenticated; private pools by members only
+      allow read: if isAuth() && (
+        resource.data.visibility == "public" || 
+        isPoolMember(poolId) || 
+        isSuperAdmin()
+      );
+
+      // Only super admin or pool owner can update pool settings
+      allow update: if isAuth() && !isPoolFrozen(poolId) && (isPoolOwner(poolId) || isSuperAdmin());
+
+      // Pool creation via Cloud Function
+      allow create: if isAuth();
+
+      // Only super admin can delete
+      allow delete: if isSuperAdmin();
+
+      // ---- MEMBERS SUB-COLLECTION ----
+      match /members/{memberId} {
+        allow read: if isAuth() && (isPoolMember(poolId) || isSuperAdmin());
+        allow create: if isAuth() && !isPoolFrozen(poolId) && (isPoolAdmin(poolId) || isSuperAdmin());
+        allow update: if isAuth() && !isPoolFrozen(poolId) && (isPoolAdmin(poolId) || isSuperAdmin());
+        allow delete: if isAuth() && !isPoolFrozen(poolId) && (isPoolAdmin(poolId) || isSuperAdmin());
+      }
+
+      // ---- PROPOSALS SUB-COLLECTION ----
+      match /proposals/{proposalId} {
+        allow read: if isAuth() && (isPoolMember(poolId) || isSuperAdmin());
+
+        // Any member can create a proposal
+        allow create: if isAuth() && isPoolMember(poolId) && !isPoolFrozen(poolId);
+
+        // Only admin/owner can update proposal status
+        allow update: if isAuth() && !isPoolFrozen(poolId) && (isPoolAdmin(poolId) || isSuperAdmin());
+
+        allow delete: if isSuperAdmin();
+
+        // ---- VOTES SUB-COLLECTION ----
+        match /votes/{voteId} {
+          allow read: if isAuth() && (isPoolMember(poolId) || isSuperAdmin());
+
+          // Members can cast one vote (voteId == their uid)
+          allow create: if isAuth() && isPoolMember(poolId) && !isPoolFrozen(poolId)
+                        && request.auth.uid == request.resource.data.voterId;
+
+          // Votes are immutable
+          allow update: if false;
+          allow delete: if false;
+        }
+      }
+
+      // ---- CASES SUB-COLLECTION ----
+      match /cases/{caseId} {
+        allow read: if isAuth() && (isPoolMember(poolId) || isSuperAdmin());
+        allow create: if isAuth() && isPoolAdmin(poolId) && !isPoolFrozen(poolId);
+        allow update: if isAuth() && isPoolAdmin(poolId) && !isPoolFrozen(poolId);
+        allow delete: if isSuperAdmin();
+      }
+
+      // ---- TREASURY SUB-COLLECTION ----
+      match /treasury/{txId} {
+        allow read: if isAuth() && (isPoolMember(poolId) || isSuperAdmin());
+
+        // Only admin/owner can create treasury entries
+        allow create: if isAuth() && isPoolAdmin(poolId) && !isPoolFrozen(poolId);
+
+        // Treasury entries are immutable (ledger integrity)
+        allow update: if false;
+        allow delete: if false;
+      }
+
+      // ---- AUDIT LOGS SUB-COLLECTION ----
+      match /auditLogs/{logId} {
+        // Readable by pool admins and super admins
+        allow read: if isAuth() && (isPoolAdmin(poolId) || isSuperAdmin());
+
+        // Audit logs are IMMUTABLE — only Cloud Functions can write
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    // ============================================
+    // SUBSCRIPTIONS COLLECTION (top-level)
+    // ============================================
+    match /subscriptions/{subId} {
+      allow read: if isAuth() && (
+        isPoolOwner(resource.data.poolId) || 
+        isPoolAdmin(resource.data.poolId) || 
+        isSuperAdmin()
+      );
+      // Managed by Cloud Functions & Super Admin
+      allow create: if isSuperAdmin();
+      allow update: if isSuperAdmin();
+      allow delete: if false;
+    }
+
+    // ============================================
+    // FEDERATION GROUPS COLLECTION (top-level)
+    // ============================================
+    match /federationGroups/{fedId} {
+      allow read: if isAuth();
+
+      // Only super admin or federation tier pool owners
+      allow create: if isAuth() && isSuperAdmin();
+      allow update: if isAuth() && isSuperAdmin();
+      allow delete: if isSuperAdmin();
+
+      // ---- FEDERATION LEDGER SUB-COLLECTION ----
+      match /ledger/{entryId} {
+        allow read: if isAuth();
+        // Ledger managed by Cloud Functions
+        allow create: if false;
+        allow update: if false;
+        allow delete: if false;
+      }
+    }
+
+    // ============================================
+    // PUBLIC TRANSPARENCY (read-only public data)
+    // ============================================
+    match /transparency/{poolId} {
+      // Anyone can read public transparency data
+      allow read: if true;
+
+      // Only Cloud Functions can write
+      allow create: if false;
+      allow update: if false;
+      allow delete: if false;
+    }
+  }
+}
