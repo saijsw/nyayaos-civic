@@ -1,0 +1,19 @@
+{
+  "name": "nyayaos-civic",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NyayaOS Civic — Open-core civic infrastructure platform",
+  "scripts": {
+    "dev": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build",
+    "deploy:functions": "cd functions && npm run deploy",
+    "deploy:hosting": "firebase deploy --only hosting",
+    "deploy:rules": "firebase deploy --only firestore:rules,storage",
+    "deploy:all": "firebase deploy",
+    "emulators": "firebase emulators:start --import=./emulator-data --export-on-exit",
+    "lint": "cd frontend && npm run lint && cd ../functions && npm run lint"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

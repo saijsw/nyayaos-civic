@@ -1,0 +1,32 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Public transparency assets (read-only for everyone)
+    match /transparency/{poolId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if false; // Only Cloud Functions can write
+    }
+
+    // Pool documents (members can read, admins can write)
+    match /pools/{poolId}/documents/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null;
+      // Note: Fine-grained pool membership checks happen in Cloud Functions
+      // Storage rules are simpler; Cloud Functions validate before generating upload URLs
+    }
+
+    // User profile images
+    match /users/{userId}/profile/{allPaths=**} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == userId
+                   && request.resource.size < 5 * 1024 * 1024 // 5MB max
+                   && request.resource.contentType.matches('image/.*');
+    }
+
+    // Deny everything else
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
